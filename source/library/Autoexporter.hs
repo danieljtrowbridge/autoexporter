@@ -10,30 +10,26 @@ module Autoexporter
   )
 where
 
+import qualified Autoexporter.Options as Options
 import qualified Control.Exception as Exception
 import qualified Data.List as List
 import qualified Data.Maybe as Maybe
 import qualified Distribution.ModuleName as Cabal
 import qualified Distribution.Text as Cabal
 import qualified System.Directory as Directory
-import qualified System.Environment as Environment
 import qualified System.FilePath as FilePath
 
 autoexporter :: IO ()
 autoexporter = do
-  -- Start by getting the command line arguments. We expect three positional
-  -- arguments from GHC: the path to the original source file, the path to the
-  -- actual input file, and the path to the output file. The source and input
-  -- files could be different if another preprocessor is involved. Since we
-  -- don't consider the file's contents, we can ignore the input file.
-  --
-  -- After GHC's arguments, we have to check for anything passed in by the user
-  -- with @-optF@.
-  arguments <- Environment.getArgs
-  (input, output, depth) <- case arguments of
-    [input, _, output] -> pure (input, output, DepthShallow)
-    [input, _, output, "--deep"] -> pure (input, output, DepthDeep)
-    _ -> Exception.throwIO (InvalidArguments arguments)
+  -- Start by getting the command line arguments. Refer to the
+  -- Autoexporter.Options module for details.
+  Options.Options
+    { Options._inputPath = input,
+      Options._outputPath = output,
+      Options._depth = depth,
+      Options._includes = includes
+    } <-
+    Options.parseOptions
 
   -- Next we convert the original source file path into a module name. If we
   -- aren't able to do this then something weird is going on and we should
@@ -46,27 +42,17 @@ autoexporter = do
   -- we simply ignore non-Haskell files and files that don't form valid module
   -- names. Also we sort the module names so that the output is deterministic.
   entries <- listDirectory depth (FilePath.dropExtension input)
-  let moduleNames = getModuleNames entries
+
+  -- Interpret "--include"d paths as being relative to the module we are
+  -- processing.
+  let absoluteIncludePaths = fmap (resolveIncludePath input) includes
+
+  -- Convert all discovered/"--include"d module paths into module names.
+  let moduleNames = getModuleNames (absoluteIncludePaths <> entries)
 
   -- Finally we render the module and write it to the output file.
   let content = renderModule moduleName moduleNames
   writeFile output content
-
--- | This type describes how to search for modules to export. A shallow search
--- only considers files in one directory. A deep search considers all files in
--- the directory tree.
-data Depth
-  = DepthShallow
-  | DepthDeep
-  deriving (Eq, Show)
-
--- | This exception type is thrown when we don't know how to interpret the
--- arguments passed to the program.
-newtype InvalidArguments
-  = InvalidArguments [String]
-  deriving (Eq, Show)
-
-instance Exception.Exception InvalidArguments
 
 -- | This function attempts to convert an arbitrary file path into a valid
 -- Haskell module name. Any extensions are ignored.
@@ -96,10 +82,10 @@ instance Exception.Exception InvalidModuleName
 -- | Lists all of the entries in the given directory. Note that unlike
 -- 'Directory.listDirectory' the results of calling this function will include
 -- the original directory name.
-listDirectory :: Depth -> FilePath -> IO [FilePath]
+listDirectory :: Options.Depth -> FilePath -> IO [FilePath]
 listDirectory depth = case depth of
-  DepthShallow -> listDirectoryShallow
-  DepthDeep -> listDirectoryDeep
+  Options.DepthShallow -> listDirectoryShallow
+  Options.DepthDeep -> listDirectoryDeep
 
 listDirectoryShallow :: FilePath -> IO [FilePath]
 listDirectoryShallow directory = do
@@ -113,6 +99,11 @@ listDirectoryDeep directory = do
         isDirectory <- Directory.doesDirectoryExist entry
         if isDirectory then listDirectoryDeep entry else pure [entry]
   fmap concat (mapM listEntry entries)
+
+-- | Convert a relative path passed via @--include@ into an absolute path.
+resolveIncludePath :: FilePath -> FilePath -> FilePath
+resolveIncludePath inputPath =
+  FilePath.combine (FilePath.takeDirectory inputPath)
 
 -- | Given a list of file paths, returns a sorted list of module names from the
 -- entries that were Haskell files.
